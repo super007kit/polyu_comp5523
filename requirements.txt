@@ -1,0 +1,13 @@
+# Webcam / vision
+opencv-python>=4.8.0
+numpy>=1.24.0
+mediapipe>=0.10.0
+ultralytics>=8.0.0
+
+# Audio: keep mic open (main) + PyAudio for SpeechRecognition
+sounddevice>=0.4.6
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.13
+
+# Semantic intent (SentenceTransformer pulls torch)
+sentence-transformers>=2.2.0

@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "/Users/james_cheung/Documents_local/CODE_SPACE/polyu_project/comp5523/datasets",
+  "weights_dir": "weights",
+  "runs_dir": "runs",
+  "uuid": "9cc22a0a70f675e9ad8d46c33167aa5482ea590da8e70e643fdc240579d7a573",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}
