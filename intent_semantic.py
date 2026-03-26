@@ -6,13 +6,14 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 INTENT_ASK_BOTTLE_POSITION = "ASK_BOTTLE_POSITION"
+INTENT_GREETING = "GREETING"
 
 INTENT_EXAMPLES: dict[str, list[str]] = {
     INTENT_ASK_BOTTLE_POSITION: [
         "where is the bottle",
         "can you tell me where the bottle is",
     ],
-    "GREETING": ["hello", "hi there"],
+    INTENT_GREETING: ["hello", "hi there"],
 }
 
 SIMILARITY_THRESHOLD = 0.6

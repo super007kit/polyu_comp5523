@@ -8,6 +8,7 @@ import numpy as np
 from audio import MicrophoneStream
 from intent_semantic import INTENT_ASK_BOTTLE_POSITION
 from speech_listen import listen_transcribe_and_classify
+from tts_speak import shutdown_tts, speak_for_intent
 from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.tasks.python.core import base_options as mp_base_options
 from mediapipe.tasks.python.vision.core import image as mp_image
@@ -214,24 +215,31 @@ mic.start()
 _speech_last: tuple[str | None, str] | None = None
 _speech_lock = threading.Lock()
 _speech_thread: threading.Thread | None = None
+# Increments on every finished listen (even if transcript+intent match the last time — needed for TTS)
+_speech_turn_id: int = 0
+# Last turn we already spoke for (avoid repeating TTS every frame)
+_prev_tts_turn_id: int = 0
 
 
 def _speech_worker() -> None:
-    global _speech_last
+    global _speech_last, _speech_turn_id
     mic.stop()
     try:
         result = listen_transcribe_and_classify()
     finally:
         mic.start()
     with _speech_lock:
+        _speech_turn_id += 1
         _speech_last = result
 
 
 def _start_speech_background() -> None:
-    global _speech_thread
+    global _speech_thread, _speech_last
     if _speech_thread is not None and _speech_thread.is_alive():
         print("Speech recognition already running; wait for it to finish.")
         return
+    with _speech_lock:
+        _speech_last = None
     _speech_thread = threading.Thread(target=_speech_worker, daemon=True)
     _speech_thread.start()
 
@@ -274,12 +282,26 @@ try:
 
         with _speech_lock:
             speech_snap = _speech_last
+            turn_id = _speech_turn_id
         speech_listening = _speech_thread is not None and _speech_thread.is_alive()
 
         last_intent = speech_snap[1] if speech_snap else None
         bottle_answer: str | None = None
         if last_intent == INTENT_ASK_BOTTLE_POSITION:
             bottle_answer = bottle_position_answer(bottle_m, bool(hand_boxes))
+
+        if (
+            not speech_listening
+            and speech_snap is not None
+            and turn_id != _prev_tts_turn_id
+        ):
+            st, inte = speech_snap
+            speak_for_intent(
+                st,
+                inte,
+                bottle_answer if inte == INTENT_ASK_BOTTLE_POSITION else None,
+            )
+            _prev_tts_turn_id = turn_id
 
         status_lines: list[str] = []
         if speech_listening:
@@ -364,6 +386,7 @@ try:
 finally:
     if _speech_thread is not None and _speech_thread.is_alive():
         _speech_thread.join(timeout=180.0)
+    shutdown_tts()
     mic.stop()
     hand_landmarker.close()
     cap.release()

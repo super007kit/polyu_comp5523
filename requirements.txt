@@ -11,3 +11,6 @@ pyaudio>=0.2.13
 
 # Semantic intent (SentenceTransformer pulls torch)
 sentence-transformers>=2.2.0
+
+# Offline TTS (macOS-friendly)
+pyttsx3>=2.90
