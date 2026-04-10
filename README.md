@@ -91,7 +91,7 @@ flowchart LR
 | Draw hand skeletons on the annotated frame | **mediapipe** drawing utilities |
 | Convert hand landmarks to **pixel bounding boxes**; extract cup / bottle boxes from YOLO | **NumPy** (box tensors), plain Python, **math** for distances |
 | Compute **closest hand** to highest-confidence cup and bottle; derive dx/dy, distance, and short text hints | Custom logic in `main.py` |
-| **Real-time guidance**: if hand and bottle are both visible, optionally speak “move left/right/up/down” (throttled so TTS is not spammed) | **pyttsx3** via `tts_speak.speak` (queued on a **threading** worker) |
+| **Real-time guidance**: if hand and a target (bottle or cup) are visible, optionally speak body-relative moves (“move frontward”, “move back-left”, etc.; throttled so TTS is not spammed) | **pyttsx3** via `tts_speak.speak` (queued on a **threading** worker) |
 | Overlay status text on the video; show **Webcam** + **Hand vs bottle data** panel | **OpenCV** (`imshow`, `putText`, **NumPy** panel image) |
 | Handle keys **`Q`** (quit) and **`S`** (start speech worker) | **OpenCV** `waitKey` |
 
