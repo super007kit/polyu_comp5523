@@ -27,12 +27,17 @@ BOTTLE_CLASS_ID = next(i for i, name in model.names.items() if name == "bottle")
 THRESH_X = 40  # pixels — how close counts as “aligned” in x
 THRESH_Y = 40  # pixels — how close counts as “aligned” in y
 
-# Real-time hand→bottle audio guidance: min frames between TTS updates when instruction changes
+ALIGNED_GUIDANCE_PHRASE = "stop, you are aligned"
+
+# Real-time hand→target audio guidance (bottle preferred, else cup): min frames between TTS updates when instruction changes
 GUIDANCE_TTS_MIN_FRAMES = 10
 
+_prev_bottle_aligned: bool = False
+_prev_cup_aligned: bool = False
+
 DATA_PANEL_W = 560
-DATA_PANEL_H = 320  # room for metrics + optional voice answer line
-DATA_WINDOW_NAME = "Hand vs bottle data"
+DATA_PANEL_H = 420  # cup + bottle metrics + optional voice answer line
+DATA_WINDOW_NAME = "Hand vs cup & bottle data"
 
 # Webcam window: S = listen + transcribe + intent (releases mic briefly for PyAudio)
 KEY_QUIT = ord("q")
@@ -76,40 +81,50 @@ def box_center(xmin: float, ymin: float, xmax: float, ymax: float) -> tuple[floa
 
 def hand_bottle_move_instruction(dx: float, dy: float) -> str:
     """
-    dx = bottle_x - hand_x, dy = bottle_y - hand_y (screen coords).
-    dx > 0: bottle is to the right of the hand → user moves hand right, etc.
+    dx = target_x - hand_x, dy = target_y - hand_y (image coords: x right, y down).
+
+    Phrases are body-relative for someone facing the webcam: +x in the image is toward *your*
+    left; toward the top of the frame is *frontward*, toward the bottom is *backward*.
     """
-    move_x = None
-    if dx > THRESH_X:
-        move_x = "move right"
-    elif dx < -THRESH_X:
-        move_x = "move left"
+    toward_your_left = dx > THRESH_X
+    toward_your_right = dx < -THRESH_X
+    backward = dy > THRESH_Y
+    frontward = dy < -THRESH_Y
 
-    move_y = None
-    if dy > THRESH_Y:
-        move_y = "move down"
-    elif dy < -THRESH_Y:
-        move_y = "move up"
+    if toward_your_left and frontward:
+        return "move front-left"
+    if toward_your_right and frontward:
+        return "move front-right"
+    if toward_your_left and backward:
+        return "move back-left"
+    if toward_your_right and backward:
+        return "move back-right"
+    if toward_your_left:
+        return "move left"
+    if toward_your_right:
+        return "move right"
+    if backward:
+        return "move backward"
+    if frontward:
+        return "move frontward"
+    return ALIGNED_GUIDANCE_PHRASE
 
-    if move_x and move_y:
-        return f"{move_x}, and {move_y}"
-    if move_x:
-        return move_x
-    if move_y:
-        return move_y
-    return "stop, you are aligned"
+
+def hand_target_aligned(dx: float, dy: float) -> bool:
+    """True when hand and target centers are within the same tolerances as ALIGNED_GUIDANCE_PHRASE."""
+    return abs(dx) <= THRESH_X and abs(dy) <= THRESH_Y
 
 
 def offset_guidance(dx: float, dy: float) -> tuple[str, str]:
-    """dx = target_x - hand_x; dy = target_y - hand_y. Left/right and up/down guidance."""
+    """dx = target_x - hand_x; dy = target_y - hand_y. Left/right and front/back hints for the status line."""
     if abs(dx) > THRESH_X:
-        instruction_x = "move right" if dx > 0 else "move left"
+        instruction_x = "left" if dx > 0 else "right"
     else:
-        instruction_x = "x aligned"
+        instruction_x = "L–R ok"
     if abs(dy) > THRESH_Y:
-        instruction_y = "move down" if dy > 0 else "move up"
+        instruction_y = "backward" if dy > 0 else "frontward"
     else:
-        instruction_y = "y aligned"
+        instruction_y = "F–B ok"
     return instruction_x, instruction_y
 
 
@@ -130,13 +145,13 @@ def yolo_boxes_for_class(
     return out
 
 
-def hand_left_right_vs_bottle(dx: float) -> str:
-    """dx = bottle_x - hand_x (from hand_target_metrics). Describes hand vs bottle in the image."""
+def hand_left_right_vs_target(dx: float, label: str) -> str:
+    """dx = target_x - hand_x (from hand_target_metrics). Describes hand vs object in the image."""
     if abs(dx) <= THRESH_X:
-        return "Left / right: ~ aligned with bottle (same column)"
+        return f"Left / right: ~ aligned with {label} (same column)"
     if dx > 0:
-        return "Hand is on the LEFT side of the bottle"
-    return "Hand is on the RIGHT side of the bottle"
+        return f"Hand is on the LEFT side of the {label}"
+    return f"Hand is on the RIGHT side of the {label}"
 
 
 def bottle_position_answer(bottle_m: dict[str, object] | None, has_hand: bool) -> str:
@@ -164,8 +179,10 @@ def make_bottle_data_panel(
     bottle_m: dict[str, object] | None,
     has_hand: bool,
     voice_answer: str | None = None,
+    *,
+    cup_m: dict[str, object] | None = None,
 ) -> np.ndarray:
-    """BGR image for a separate OpenCV window with bottle distance and left/right text."""
+    """BGR image for a separate OpenCV window with cup/bottle distance and left/right text."""
     panel = np.full((DATA_PANEL_H, DATA_PANEL_W, 3), 36, dtype=np.uint8)
     y = 36
     line_h = 30
@@ -184,22 +201,33 @@ def make_bottle_data_panel(
         )
         y += line_h
 
-    put("Hand  <->  bottle", 0.85, (200, 220, 255))
+    put("Hand  <->  cup & bottle", 0.85, (200, 220, 255))
     y += 6
 
     if not has_hand:
         put("Status: no hand detected", 0.65, (120, 120, 255))
-    elif bottle_m is None:
-        put("Status: no bottle detected", 0.65, (120, 120, 255))
     else:
-        dist = float(bottle_m["dist"])
-        dx = float(bottle_m["dx"])
-        dy = float(bottle_m["dy"])
-        put(f"Distance (2D): {dist:.1f} pixels")
+        put("Cup", 0.72, (180, 220, 255))
+        if cup_m is None:
+            put("  No cup in frame", 0.6, (120, 120, 255))
+        else:
+            dist = float(cup_m["dist"])
+            dx = float(cup_m["dx"])
+            dy = float(cup_m["dy"])
+            put(f"  Distance (2D): {dist:.1f} px", 0.6)
+            put(f"  {hand_left_right_vs_target(dx, 'cup')}", 0.62, (180, 255, 200))
+            put(f"  dx (cup - hand): {dx:+.0f} px  |  dy: {dy:+.0f} px", 0.52, (180, 180, 180))
         y += 4
-        put(hand_left_right_vs_bottle(dx), 0.68, (180, 255, 180))
-        y += 4
-        put(f"dx (bottle - hand): {dx:+.0f} px  |  dy: {dy:+.0f} px", 0.55, (180, 180, 180))
+        put("Bottle", 0.72, (180, 220, 255))
+        if bottle_m is None:
+            put("  No bottle in frame", 0.6, (120, 120, 255))
+        else:
+            dist = float(bottle_m["dist"])
+            dx = float(bottle_m["dx"])
+            dy = float(bottle_m["dy"])
+            put(f"  Distance (2D): {dist:.1f} px", 0.6)
+            put(f"  {hand_left_right_vs_target(dx, 'bottle')}", 0.62, (180, 255, 200))
+            put(f"  dx (bottle - hand): {dx:+.0f} px  |  dy: {dy:+.0f} px", 0.52, (180, 180, 180))
     if voice_answer:
         y += 8
         put("Voice (where is the bottle):", 0.62, (200, 220, 255))
@@ -315,17 +343,35 @@ try:
         cup_m = hand_target_metrics(hand_boxes, cup_boxes) if hand_boxes else None
         bottle_m = hand_target_metrics(hand_boxes, bottle_boxes) if hand_boxes else None
 
+        # Prefer bottle for spoken move hints; use cup when no bottle (same geometry as hand_bottle_move_instruction).
+        guidance_metrics = bottle_m if bottle_m else cup_m
         guidance_instruction: str | None = None
-        if bottle_m and hand_boxes:
+        if guidance_metrics and hand_boxes:
             guidance_instruction = hand_bottle_move_instruction(
-                float(bottle_m["dx"]),
-                float(bottle_m["dy"]),
+                float(guidance_metrics["dx"]),
+                float(guidance_metrics["dy"]),
             )
 
         with _speech_lock:
             speech_snap = _speech_last
             turn_id = _speech_turn_id
         speech_listening = _speech_thread is not None and _speech_thread.is_alive()
+
+        bottle_aligned = (
+            bottle_m is not None
+            and hand_target_aligned(float(bottle_m["dx"]), float(bottle_m["dy"]))
+        )
+        cup_aligned = (
+            cup_m is not None
+            and hand_target_aligned(float(cup_m["dx"]), float(cup_m["dy"]))
+        )
+        grab_edge = (bottle_aligned and not _prev_bottle_aligned) or (
+            cup_aligned and not _prev_cup_aligned
+        )
+        if grab_edge and not speech_listening:
+            speak("Congratulations")
+        _prev_bottle_aligned = bottle_aligned
+        _prev_cup_aligned = cup_aligned
 
         last_intent = speech_snap[1] if speech_snap else None
         bottle_answer: str | None = None
@@ -349,7 +395,10 @@ try:
             _guidance_last_spoken = None
         elif not speech_listening:
             if guidance_instruction != _guidance_last_spoken:
-                if (
+                if guidance_instruction == ALIGNED_GUIDANCE_PHRASE:
+                    _guidance_last_spoken = guidance_instruction
+                    _guidance_last_speak_frame = _guidance_frame_count
+                elif (
                     _guidance_frame_count - _guidance_last_speak_frame
                     >= GUIDANCE_TTS_MIN_FRAMES
                 ):
@@ -387,10 +436,10 @@ try:
                         f"bottle: {bottle_m['ix']} | {bottle_m['iy']}",
                     ]
                 )
-                if guidance_instruction:
-                    status_lines.append(f"guide: {guidance_instruction}")
             else:
                 status_lines.append("no bottle in frame")
+            if guidance_instruction:
+                status_lines.append(f"guide: {guidance_instruction}")
 
         if cup_m:
             cv2.line(annotated, cup_m["hand_pt"], cup_m["target_pt"], (0, 255, 255), 2)
@@ -431,7 +480,12 @@ try:
         cv2.putText(annotated, hint, (10, hb), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 1, cv2.LINE_AA)
 
         cv2.imshow("Webcam", annotated)
-        data_panel = make_bottle_data_panel(bottle_m, bool(hand_boxes), voice_answer=bottle_answer)
+        data_panel = make_bottle_data_panel(
+            bottle_m,
+            bool(hand_boxes),
+            voice_answer=bottle_answer,
+            cup_m=cup_m,
+        )
         cv2.imshow(DATA_WINDOW_NAME, data_panel)
 
         key = cv2.waitKey(1) & 0xFF
