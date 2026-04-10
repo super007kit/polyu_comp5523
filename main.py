@@ -8,7 +8,7 @@ import numpy as np
 from audio import MicrophoneStream
 from intent_semantic import INTENT_ASK_BOTTLE_POSITION
 from speech_listen import listen_transcribe_and_classify
-from tts_speak import shutdown_tts, speak_for_intent
+from tts_speak import shutdown_tts, speak, speak_for_intent
 from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.tasks.python.core import base_options as mp_base_options
 from mediapipe.tasks.python.vision.core import image as mp_image
@@ -26,6 +26,9 @@ BOTTLE_CLASS_ID = next(i for i, name in model.names.items() if name == "bottle")
 
 THRESH_X = 40  # pixels — how close counts as “aligned” in x
 THRESH_Y = 40  # pixels — how close counts as “aligned” in y
+
+# Real-time hand→bottle audio guidance: min frames between TTS updates when instruction changes
+GUIDANCE_TTS_MIN_FRAMES = 10
 
 DATA_PANEL_W = 560
 DATA_PANEL_H = 320  # room for metrics + optional voice answer line
@@ -69,6 +72,32 @@ def landmarks_to_pixel_box(landmarks, width: int, height: int) -> tuple[float, f
 
 def box_center(xmin: float, ymin: float, xmax: float, ymax: float) -> tuple[float, float]:
     return (xmin + xmax) / 2, (ymin + ymax) / 2
+
+
+def hand_bottle_move_instruction(dx: float, dy: float) -> str:
+    """
+    dx = bottle_x - hand_x, dy = bottle_y - hand_y (screen coords).
+    dx > 0: bottle is to the right of the hand → user moves hand right, etc.
+    """
+    move_x = None
+    if dx > THRESH_X:
+        move_x = "move right"
+    elif dx < -THRESH_X:
+        move_x = "move left"
+
+    move_y = None
+    if dy > THRESH_Y:
+        move_y = "move down"
+    elif dy < -THRESH_Y:
+        move_y = "move up"
+
+    if move_x and move_y:
+        return f"{move_x}, and {move_y}"
+    if move_x:
+        return move_x
+    if move_y:
+        return move_y
+    return "stop, you are aligned"
 
 
 def offset_guidance(dx: float, dy: float) -> tuple[str, str]:
@@ -220,6 +249,11 @@ _speech_turn_id: int = 0
 # Last turn we already spoke for (avoid repeating TTS every frame)
 _prev_tts_turn_id: int = 0
 
+# Real-time move guidance (bottle vs hand)
+_guidance_frame_count = 0
+_guidance_last_spoken: str | None = None
+_guidance_last_speak_frame = -10_000
+
 
 def _speech_worker() -> None:
     global _speech_last, _speech_turn_id
@@ -247,6 +281,7 @@ def _start_speech_background() -> None:
 try:
     frame_time_ms = 0
     while True:
+        _guidance_frame_count += 1
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame")
@@ -280,6 +315,13 @@ try:
         cup_m = hand_target_metrics(hand_boxes, cup_boxes) if hand_boxes else None
         bottle_m = hand_target_metrics(hand_boxes, bottle_boxes) if hand_boxes else None
 
+        guidance_instruction: str | None = None
+        if bottle_m and hand_boxes:
+            guidance_instruction = hand_bottle_move_instruction(
+                float(bottle_m["dx"]),
+                float(bottle_m["dy"]),
+            )
+
         with _speech_lock:
             speech_snap = _speech_last
             turn_id = _speech_turn_id
@@ -302,6 +344,18 @@ try:
                 bottle_answer if inte == INTENT_ASK_BOTTLE_POSITION else None,
             )
             _prev_tts_turn_id = turn_id
+
+        if guidance_instruction is None:
+            _guidance_last_spoken = None
+        elif not speech_listening:
+            if guidance_instruction != _guidance_last_spoken:
+                if (
+                    _guidance_frame_count - _guidance_last_speak_frame
+                    >= GUIDANCE_TTS_MIN_FRAMES
+                ):
+                    speak(guidance_instruction)
+                    _guidance_last_spoken = guidance_instruction
+                    _guidance_last_speak_frame = _guidance_frame_count
 
         status_lines: list[str] = []
         if speech_listening:
@@ -333,6 +387,8 @@ try:
                         f"bottle: {bottle_m['ix']} | {bottle_m['iy']}",
                     ]
                 )
+                if guidance_instruction:
+                    status_lines.append(f"guide: {guidance_instruction}")
             else:
                 status_lines.append("no bottle in frame")
 
